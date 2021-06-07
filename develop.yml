@@ -1,0 +1,837 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: ECS on Fargate
+# ------------------------------------------------------------#
+# Input Parameters
+# ------------------------------------------------------------#
+Parameters:
+  #Project Name Parameter
+  ProjectPrefix:
+    Type: String
+    Default: ""
+
+  #NetWork Configration Parameter
+  VPCCIDR:
+    Type: String
+    Default: "192.168.0.0/16"
+  PublicSubnetACIDR:
+    Type: String
+    Default: "192.168.0.0/24"
+  PublicSubnetCCIDR:
+    Type: String
+    Default: "192.168.64.0/24"
+  PrivateSubnetACIDR:
+    Type: String
+    Default: "192.168.128.0/24"
+  PrivateSubnetCCIDR:
+    Type: String
+    Default: "192.168.192.0/24"
+
+  #ECS Settings
+  #Cluster
+  EcsClusterName:
+    Type: String
+    Default: Cluster
+  EcsRoleName:
+    Type: String
+    Default: ECSTaskRole
+  #Service
+  EcsAppServiceName:
+    Type: String
+    Default: Application
+  EcsWebServiceName:
+    Type: String
+    Default: WebServer
+  #Task Definition
+  EcsWebTaskName:
+    Type: String
+    Default: web
+  EcsAppTaskName:
+    Type: String
+    Default: app
+  #Image
+  EcsWebImageName:
+    Type: String
+    Default: web
+  EcsAppImageName:
+    Type: String
+    Default: app
+  #Container
+  DefaultLogLevel:
+    Type: String
+    Default: DEBUG
+  EcsWebContainerName:
+    Type: String
+    Default: web
+  EcsAppContainerName:
+    Type: String
+    Default: app
+  #ServiceAutoScaling
+  ServiceScaleEvaluationPeriods:
+    Type: Number
+    Default: 2
+  ServiceCpuScaleOutThreshold:
+    Type: Number
+    Default: 50
+  ServiceCpuScaleInThreshold:
+    Type: Number
+    Default: 25
+  TaskMinContainerCount:
+    Type: Number
+    Default: 1
+  TaskMaxContainerCount:
+    Type: Number
+    Default: 2
+
+Resources:
+  # ------------------------------------------------------------#
+  #  VPC
+  # ------------------------------------------------------------#
+  VPC:
+    Type: "AWS::EC2::VPC"
+    Properties:
+      CidrBlock: !Ref VPCCIDR
+      EnableDnsSupport: "true"
+      EnableDnsHostnames: "true"
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectPrefix}vpc"
+  InternetGateway:
+    Type: "AWS::EC2::InternetGateway"
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectPrefix}igw"
+  InternetGatewayAttachment:
+    Type: "AWS::EC2::VPCGatewayAttachment"
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  # ------------------------------------------------------------#
+  #  Subnet
+  # ------------------------------------------------------------#
+  PublicSubnetA:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Sub ${AWS::Region}a
+      CidrBlock: !Ref PublicSubnetACIDR
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectPrefix}public-subnet-a"
+  PublicSubnetC:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Sub ${AWS::Region}c
+      CidrBlock: !Ref PublicSubnetCCIDR
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectPrefix}public-subnet-c"
+  PrivateSubnetA:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      MapPublicIpOnLaunch: false
+      AvailabilityZone: !Sub ${AWS::Region}a
+      CidrBlock: !Ref PrivateSubnetACIDR
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectPrefix}private-subnet-a"
+  PrivateSubnetC:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      MapPublicIpOnLaunch: false
+      AvailabilityZone: !Sub ${AWS::Region}c
+      CidrBlock: !Ref PrivateSubnetCCIDR
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectPrefix}private-subnet-c"
+
+  # ------------------------------------------------------------#
+  #  RouteTable
+  # ------------------------------------------------------------#
+  PublicRouteTableA:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectPrefix}public-route-a"
+  PublicRouteTableC:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectPrefix}public-route-c"
+  PrivateRouteTableA:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectPrefix}private-route-a"
+  PrivateRouteTableC:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectPrefix}private-route-c"
+
+  # ------------------------------------------------------------#
+  # Routing
+  # ------------------------------------------------------------#
+  PublicRouteA:
+    Type: "AWS::EC2::Route"
+    DependsOn:
+      - InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTableA
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref InternetGateway
+  PublicRouteC:
+    Type: "AWS::EC2::Route"
+    DependsOn:
+      - InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTableC
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref InternetGateway
+
+  # ------------------------------------------------------------#
+  # RouteTable Associate
+  # ------------------------------------------------------------#
+  PublicSubnetARouteTableAssociation:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTableA
+  PublicSubnetCRouteTableAssociation:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      SubnetId: !Ref PublicSubnetC
+      RouteTableId: !Ref PublicRouteTableC
+  PrivateSubnetARouteTableAssociation:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTableA
+  PrivateSubnetCRouteTableAssociation:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      SubnetId: !Ref PrivateSubnetC
+      RouteTableId: !Ref PrivateRouteTableC
+  # ------------------------------------------------------------#
+  # ALB
+  # ------------------------------------------------------------#
+  SecurityGroupForALB:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${ProjectPrefix}SecurityGroupForALB
+      GroupDescription: This is for SecurityGroupForALB
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - CidrIp: "0.0.0.0/0"
+          Description: This is for ALB
+          FromPort: 80
+          IpProtocol: tcp
+          ToPort: 80
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectPrefix}SecurityGroupForALB
+  #Listener
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref TargetGroup
+          Type: forward
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+  #ALB
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      IpAddressType: ipv4
+      Name: !Sub ${ProjectPrefix}LoadBalancer
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref SecurityGroupForALB
+      Subnets:
+        - !Ref PublicSubnetA
+        - !Ref PublicSubnetC
+      Type: application
+  #TargetGroup
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 60
+      HealthCheckPath: /healthcheck
+      HealthCheckPort: traffic-port
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 30
+      HealthyThresholdCount: 5
+      Matcher:
+        HttpCode: 200-301
+      Name: !Sub ${ProjectPrefix}TargetGroup
+      Port: 80
+      Protocol: HTTP
+      TargetType: ip
+      UnhealthyThresholdCount: 3
+      VpcId: !Ref VPC
+
+  # ------------------------------------------------------------#
+  # Cloud Map
+  # ------------------------------------------------------------#
+  #Service Discovery Namespace
+  PrivateNamespace:
+    Type: AWS::ServiceDiscovery::PrivateDnsNamespace
+    Properties:
+      Name: !Sub "${ProjectPrefix}NameSpace"
+      Vpc: !Ref VPC
+  #Service Discovery Service
+  DiscoveryService:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Description: Discovery Service for the Demo Application
+      DnsConfig:
+        RoutingPolicy: MULTIVALUE
+        DnsRecords:
+          - TTL: 60
+            Type: A
+          - TTL: 60
+            Type: SRV
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+      Name: !Sub ${ProjectPrefix}${EcsAppServiceName}
+      NamespaceId: !Ref PrivateNamespace
+  # ------------------------------------------------------------#
+  # Cloud Watch Log Group
+  # ------------------------------------------------------------#
+  EcsWebContainerLogGroup:
+    Type: "AWS::Logs::LogGroup"
+    Properties:
+      LogGroupName: !Sub /ecs/logs/${ProjectPrefix}${EcsWebContainerName}
+
+  # EcsWebFluentBitContainerLogGroup:
+  #   Type: "AWS::Logs::LogGroup"
+  #   Properties:
+  #     LogGroupName: !Sub /ecs/logs/${ProjectPrefix}${EcsWebContainerName}fluentbit
+
+  EcsAppContainerLogGroup:
+    Type: "AWS::Logs::LogGroup"
+    Properties:
+      LogGroupName: !Sub /ecs/logs/${ProjectPrefix}${EcsAppContainerName}
+
+  # EcsAppFluentBitContainerLogGroup:
+  #   Type: "AWS::Logs::LogGroup"
+  #   Properties:
+  #     LogGroupName: !Sub /ecs/logs/${ProjectPrefix}${EcsAppContainerName}fluentbit
+
+  # ------------------------------------------------------------#
+  # Kinesis Firehose
+  # ------------------------------------------------------------#
+  # #Web
+  # EcsWebContainerLogDeliveryStream:
+  #   Type: AWS::KinesisFirehose::DeliveryStream
+  #   DependsOn:
+  #     - S3Bucket
+  #   Properties:
+  #     DeliveryStreamName: !Sub ${ProjectPrefix}${EcsWebContainerName}
+  #     DeliveryStreamType: DirectPut
+  #     S3DestinationConfiguration:
+  #       BucketARN: !GetAtt S3Bucket.Arn
+  #       BufferingHints:
+  #         SizeInMBs: 1
+  #         IntervalInSeconds: 900
+  #       CompressionFormat: ZIP
+  #       RoleARN: !Sub arn:aws:iam::${AWS::AccountId}:role/${EcsRoleName}
+  # #App
+  # EcsAppContainerLogDeliveryStream:
+  #   Type: AWS::KinesisFirehose::DeliveryStream
+  #   DependsOn:
+  #     - S3Bucket
+  #   Properties:
+  #     DeliveryStreamName: !Sub ${ProjectPrefix}${EcsAppContainerName}
+  #     DeliveryStreamType: DirectPut
+  #     S3DestinationConfiguration:
+  #       BucketARN: !GetAtt S3Bucket.Arn
+  #       BufferingHints:
+  #         SizeInMBs: 1
+  #         IntervalInSeconds: 900
+  #       CompressionFormat: ZIP
+  #       RoleARN: !Sub arn:aws:iam::${AWS::AccountId}:role/${EcsRoleName}
+  # ------------------------------------------------------------#
+  # Security Groups for ECS Service
+  # ------------------------------------------------------------#
+  # #SecurityGroup for VPC EndPoint
+  # SecurityGroupForVpcEndPoint:
+  #   Type: AWS::EC2::SecurityGroup
+  #   Properties:
+  #     GroupDescription: SecurityGroupForVpcEndPoint
+  #     GroupName: !Sub ${ProjectPrefix}SecurityGroupForVpcEndPoint
+  #     VpcId: !Ref VPC
+  #     SecurityGroupIngress:
+  #       - SourceSecurityGroupId: !Ref SecurityGroupForWebService
+  #         FromPort: 0
+  #         ToPort: 65535
+  #         IpProtocol: tcp
+  #       - SourceSecurityGroupId: !Ref SecurityGroupForAppService
+  #         FromPort: 0
+  #         ToPort: 65535
+  #         IpProtocol: tcp
+  #     Tags:
+  #       - Key: Name
+  #         Value: ${ProjectPrefix}SecurityGroupForVpcEndPoint
+
+  #SecurityGroupForWebService
+  SecurityGroupForWebService:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${ProjectPrefix}SecurityGroupForWebService
+      GroupDescription: This is for SecurityGroupForWebService
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - FromPort: 80
+          IpProtocol: tcp
+          SourceSecurityGroupId: !Ref SecurityGroupForALB
+          ToPort: 80
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectPrefix}SecurityGroupForWebService
+
+  #SecurityGroupForAppService
+  SecurityGroupForAppService:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${ProjectPrefix}SecurityGroupForAppService
+      GroupDescription: This is for SecurityGroupForAppService
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - FromPort: 3000
+          IpProtocol: tcp
+          SourceSecurityGroupId: !Ref SecurityGroupForWebService
+          ToPort: 3000
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectPrefix}SecurityGroupForAppService
+  # ------------------------------------------------------------#
+  # S3
+  # ------------------------------------------------------------#
+  # S3Bucket:
+  #   Type: AWS::S3::Bucket
+  #   Properties:
+  #     BucketName: !Sub ${ProjectPrefix}fluentbit-bucket
+  #     AccessControl: PublicReadWrite
+  # ------------------------------------------------------------#
+  # VPC Endpoint
+  # ------------------------------------------------------------#
+  # #ECR PrivateLink
+  # EcrPrivateLink:
+  #   Type: AWS::EC2::VPCEndpoint
+  #   Properties:
+  #     PrivateDnsEnabled: true
+  #     SecurityGroupIds:
+  #       - !Ref SecurityGroupForVpcEndPoint
+  #     ServiceName: !Sub com.amazonaws.${AWS::Region}.ecr.dkr
+  #     SubnetIds:
+  #       - !Ref PrivateSubnetA
+  #       - !Ref PrivateSubnetC
+  #     VpcEndpointType: Interface
+  #     VpcId: !Ref VPC
+
+  # #S3 Gateway
+  # S3PrivateLink:
+  #   Type: AWS::EC2::VPCEndpoint
+  #   Properties:
+  #     PrivateDnsEnabled: false
+  #     RouteTableIds:
+  #       - !Ref PrivateRouteTableA
+  #       - !Ref PrivateRouteTableC
+  #     ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+  #     VpcEndpointType: Gateway
+  #     VpcId: !Ref VPC
+
+  # #CloudWatch EndPoint
+  # CloudWatchPrivateLink:
+  #   Type: AWS::EC2::VPCEndpoint
+  #   Properties:
+  #     PrivateDnsEnabled: true
+  #     SecurityGroupIds:
+  #       - !Ref SecurityGroupForVpcEndPoint
+  #     ServiceName: !Sub com.amazonaws.${AWS::Region}.logs
+  #     SubnetIds:
+  #       - !Ref PrivateSubnetA
+  #       - !Ref PrivateSubnetC
+  #     VpcEndpointType: Interface
+  #     VpcId: !Ref VPC
+  # ------------------------------------------------------------#
+  # ECS
+  # ------------------------------------------------------------#
+  #Cluster
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub ${ProjectPrefix}${EcsClusterName}
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectPrefix}${EcsClusterName}
+
+  #Web TaskDefinition
+  EcsWebTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn:
+      - EcsWebContainerLogGroup
+      # - EcsWebFluentBitContainerLogGroup
+      # - EcsWebContainerLogDeliveryStream
+      # - EcrPrivateLink
+      # - S3PrivateLink
+      # - CloudWatchPrivateLink
+    Properties:
+      ContainerDefinitions:
+        #Web
+        - Essential: true
+          Environment:
+            - Name: SERVER_NAME
+              Value: !Join
+                - ""
+                - - !Sub ${ProjectPrefix}${EcsAppServiceName}
+                  - "."
+                  - !Sub ${ProjectPrefix}NameSpace
+          Image: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcsWebImageName}:latest
+          PortMappings:
+            - ContainerPort: 80
+              HostPort: 80
+              Protocol: tcp
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref EcsWebContainerLogGroup
+              awslogs-region: !Sub ${AWS::Region}
+              awslogs-stream-prefix: ecs
+          # LogConfiguration:
+          #   LogDriver: awsfirelens
+          #   Options:
+          #     Name: firehose
+          #     region: !Sub ${AWS::Region}
+          #     delivery_stream: !Ref EcsWebContainerLogDeliveryStream
+          Name: !Sub ${ProjectPrefix}${EcsWebContainerName}
+        # #fluentbit
+        # - Name: !Sub ${ProjectPrefix}${EcsWebContainerName}fluentbit
+        #   Image: !Sub 906394416424.dkr.ecr.${AWS::Region}.amazonaws.com/aws-for-fluent-bit:latest
+        #   Essential: true
+        #   FirelensConfiguration:
+        #     Type: fluentbit
+        #   LogConfiguration:
+        #     LogDriver: awslogs
+        #     Options:
+        #       awslogs-group: !Ref EcsWebFluentBitContainerLogGroup
+        #       awslogs-region: !Sub ${AWS::Region}
+        #       awslogs-stream-prefix: ecs
+      Cpu: 256
+      ExecutionRoleArn: !Sub arn:aws:iam::${AWS::AccountId}:role/${EcsRoleName}
+      Family: !Sub ${EcsWebTaskName}
+      Memory: 512
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      TaskRoleArn: !Sub arn:aws:iam::${AWS::AccountId}:role/${EcsRoleName}
+
+  #Web Service
+  EcsWebService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - Listener
+    Properties:
+      Cluster: !Ref EcsCluster
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+      DeploymentController:
+        # Type: CODE_DEPLOY #Blue/Green Deploy
+        Type: ECS
+      DesiredCount: 1
+      HealthCheckGracePeriodSeconds: 600
+      LaunchType: FARGATE
+      LoadBalancers:
+        - ContainerName: !Sub ${ProjectPrefix}${EcsWebContainerName}
+          ContainerPort: 80
+          TargetGroupArn: !Ref TargetGroup
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          # AssignPublicIp: DISABLED
+          AssignPublicIp: ENABLED
+          SecurityGroups:
+            - !Ref SecurityGroupForWebService
+          Subnets:
+            # - !Ref PrivateSubnetA
+            # - !Ref PrivateSubnetC
+            - !Ref PublicSubnetA
+            - !Ref PublicSubnetC
+      PlatformVersion: LATEST
+      SchedulingStrategy: REPLICA
+      ServiceName: !Sub ${ProjectPrefix}${EcsWebServiceName}
+      TaskDefinition: !Ref EcsWebTaskDefinition
+
+  #Application TaskDefinition
+  EcsAppTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn:
+      - EcsAppContainerLogGroup
+      # - EcsAppFluentBitContainerLogGroup
+      # - EcsAppContainerLogDeliveryStream
+      # - EcrPrivateLink
+      # - S3PrivateLink
+      # - CloudWatchPrivateLink
+    Properties:
+      ContainerDefinitions:
+        #app
+        - Essential: true
+          Environment:
+            - Name: LogLevel
+              Value: !Sub ${DefaultLogLevel}
+            - Name: DefaultRegion
+              Value: !Sub ${AWS::Region}
+          Image: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcsAppImageName}:latest
+          PortMappings:
+            - ContainerPort: 3000
+              HostPort: 3000
+              Protocol: tcp
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref EcsAppContainerLogGroup
+              awslogs-region: !Sub ${AWS::Region}
+              awslogs-stream-prefix: ecs
+          # LogConfiguration:
+          #   LogDriver: awsfirelens
+          #   Options:
+          #     Name: firehose
+          #     region: !Sub ${AWS::Region}
+          #     delivery_stream: !Ref EcsAppContainerLogDeliveryStream
+          Name: !Sub ${ProjectPrefix}${EcsAppContainerName}
+        #   #fluentbit
+        # - Name: !Sub ${ProjectPrefix}${EcsAppContainerName}fluentbit
+        #   Image: !Sub 906394416424.dkr.ecr.${AWS::Region}.amazonaws.com/aws-for-fluent-bit:latest
+        #   Essential: true
+        #   FirelensConfiguration:
+        #     Type: fluentbit
+        #   LogConfiguration:
+        #     LogDriver: awslogs
+        #     Options:
+        #       awslogs-group: !Ref EcsAppFluentBitContainerLogGroup
+        #       awslogs-region: !Sub ${AWS::Region}
+        #       awslogs-stream-prefix: ecs
+      Cpu: 256
+      ExecutionRoleArn: !Sub arn:aws:iam::${AWS::AccountId}:role/${EcsRoleName}
+      Family: !Sub ${EcsAppTaskName}
+      Memory: 512
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      TaskRoleArn: !Sub arn:aws:iam::${AWS::AccountId}:role/${EcsRoleName}
+
+  #Application Service
+  EcsAppService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - Listener
+    Properties:
+      Cluster: !Ref EcsCluster
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+      DeploymentController:
+        # Type: CODE_DEPLOY #Blue/Green Deploy
+        Type: ECS
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          # AssignPublicIp: DISABLED
+          AssignPublicIp: ENABLED
+          SecurityGroups:
+            - !Ref SecurityGroupForAppService
+          Subnets:
+            # - !Ref PrivateSubnetA
+            # - !Ref PrivateSubnetC
+            - !Ref PublicSubnetA
+            - !Ref PublicSubnetC
+      PlatformVersion: LATEST
+      SchedulingStrategy: REPLICA
+      ServiceName: !Sub ${ProjectPrefix}${EcsAppServiceName}
+      TaskDefinition: !Ref EcsAppTaskDefinition
+      ServiceRegistries:
+        - RegistryArn: !GetAtt DiscoveryService.Arn
+          Port: 3000
+  # ------------------------------------------------------------#
+  # Auto Scaling Service
+  # ------------------------------------------------------------#
+  #Web Service
+  #EcsWebService ScalingTarget
+  EcsWebServiceScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    DependsOn:
+      - EcsWebService
+    Properties:
+      MinCapacity: !Ref TaskMinContainerCount
+      MaxCapacity: !Ref TaskMaxContainerCount
+      ResourceId: !Join
+        - /
+        - - service
+          - !Ref EcsCluster
+          - !GetAtt EcsWebService.Name
+      RoleARN: !Sub arn:aws:iam::${AWS::AccountId}:role/${EcsRoleName}
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+
+  #EcsWebService ScalingPolicy
+  EcsWebServiceScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    DependsOn:
+      - EcsWebServiceScalingTarget
+    Properties:
+      PolicyName: !Sub "${ProjectPrefix}${EcsWebServiceName}-ScalingPolicy"
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref EcsWebServiceScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        DisableScaleIn: false
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        ScaleInCooldown: 60
+        ScaleOutCooldown: 60
+        TargetValue: 70.0
+
+  #Application Service
+  #EcsAppService ScalingTarget
+  EcsAppServiceScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    DependsOn:
+      - EcsAppService
+    Properties:
+      MinCapacity: !Ref TaskMinContainerCount
+      MaxCapacity: !Ref TaskMaxContainerCount
+      ResourceId: !Join
+        - /
+        - - service
+          - !Ref EcsCluster
+          - !GetAtt EcsAppService.Name
+      RoleARN: !Sub arn:aws:iam::${AWS::AccountId}:role/${EcsRoleName}
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+
+  #EcsAppService ScalingPolicy
+  EcsAppServiceScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    DependsOn:
+      - EcsAppServiceScalingTarget
+    Properties:
+      PolicyName: !Sub "${ProjectPrefix}${EcsAppServiceName}-ScalingPolicy"
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref EcsAppServiceScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        DisableScaleIn: false
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        ScaleInCooldown: 60
+        ScaleOutCooldown: 60
+        TargetValue: 70.0
+# ------------------------------------------------------------#
+# Output
+# ------------------------------------------------------------#
+Outputs:
+  #S3
+  # S3BucketOutput:
+  #   Value: !Ref S3Bucket
+  #   Export:
+  #     Name: S3Bucket
+
+  #ALB
+  ListenerOutput:
+    Value: !Ref Listener
+    Export:
+      Name: Listener
+  ALBOutput:
+    Value: !Ref ALB
+    Export:
+      Name: ALB
+  TargetGroupOutput:
+    Value: !Ref TargetGroup
+    Export:
+      Name: TargetGroup
+
+  #Net Work
+  VPCOutput:
+    Value: !Ref VPC
+    Export:
+      Name: VPC
+  PublicSubnetAOutput:
+    Value: !Ref PublicSubnetA
+    Export:
+      Name: PublicSubnetA
+  PublicSubnetCOutput:
+    Value: !Ref PublicSubnetC
+    Export:
+      Name: PublicSubnetC
+  PrivateSubnetAOutput:
+    Value: !Ref PrivateSubnetA
+    Export:
+      Name: PrivateSubnetA
+  PrivateSubnetCOutput:
+    Value: !Ref PrivateSubnetC
+    Export:
+      Name: PrivateSubnetC
+
+  #SecurityGroup
+  SecurityGroupForWebServiceOutput:
+    Value: !Ref SecurityGroupForWebService
+    Export:
+      Name: SecurityGroupForWebService
+  SecurityGroupForAppServiceOutput:
+    Value: !Ref SecurityGroupForAppService
+    Export:
+      Name: SecurityGroupForAppService
+
+  #ECS
+  EcsClusterOutput:
+    Value: !Ref EcsCluster
+    Export:
+      Name: EcsCluster
+  EcsWebTaskDefinitionOutput:
+    Value: !Ref EcsWebTaskDefinition
+    Export:
+      Name: EcsWebTaskDefinition
+  EcsWebServiceOutput:
+    Value: !Ref EcsWebService
+    Export:
+      Name: EcsWebService
+  EcsAppTaskDefinitionOutput:
+    Value: !Ref EcsAppTaskDefinition
+    Export:
+      Name: EcsAppTaskDefinition
+  EcsAppServiceOutput:
+    Value: !Ref EcsAppService
+    Export:
+      Name: EcsAppService
+
+  #Auto Scaling
+  EcsWebServiceScalingTargetOutput:
+    Value: !Ref EcsWebServiceScalingTarget
+    Export:
+      Name: EcsWebServiceScalingTarget
+  EcsAppServiceScalingTargetOutput:
+    Value: !Ref EcsAppServiceScalingTarget
+    Export:
+      Name: EcsAppServiceScalingTarget
